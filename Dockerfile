@@ -26,9 +26,9 @@
 
 FROM n8nio/n8n:latest
 
-# Set timezone
-ENV TZ=Asia/Kolkata
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+# # Set timezone
+# ENV TZ=Asia/Kolkata
+# RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Environment variables
 ENV N8N_PROTOCOL=https
@@ -46,3 +46,4 @@ EXPOSE 5678
 
 # Start n8n
 CMD ["n8n", "start"]
+

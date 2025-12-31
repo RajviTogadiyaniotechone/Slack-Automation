@@ -1,0 +1,564 @@
+{
+  "name": "Slack Reminder Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Get current date and time in IST (Indian Standard Time)\nconst now = new Date();\nconst nowUTC = now.getTime();\n\n// IST is UTC+5:30\nconst istOffset = 5.5 * 60 * 60 * 1000; // 5.5 hours in milliseconds\nconst nowIST = new Date(nowUTC + istOffset);\n\nconst currentHour = nowIST.getHours();\nconst currentMinute = nowIST.getMinutes();\nconst currentSecond = nowIST.getSeconds();\n\n// Get today's date at midnight in IST for date comparison\nconst todayIST = new Date(nowIST);\ntodayIST.setHours(0, 0, 0, 0);\n\n// Today's date string\nconst year = todayIST.getFullYear();\nconst month = String(todayIST.getMonth() + 1).padStart(2, '0');\nconst day = String(todayIST.getDate()).padStart(2, '0');\nconst todayDateStr = `${year}-${month}-${day}`;\n\n// Variables to store the current schedule data (from merged cells)\nlet currentSchedule = null;\nconst outputItems = [];\n\n// For each row from the sheet\nfor (const item of items) {\n  const row = item.json;\n  \n  // Check if this row has schedule data (columns A-C and E have values)\n  // Row with schedule will have: start_date, end_date, Time, and TODO/MidDay/End Day\n  const hasScheduleData = row.start_date && row.start_date.trim() !== '' && \n                         row.end_date && row.end_date.trim() !== '' && \n                         row.Time && row.Time.trim() !== '' && \n                         (row.TODO || row.MidDay || row['End Day']);\n  \n  if (hasScheduleData) {\n    // This is a schedule row (first row of merged cells)\n    currentSchedule = {\n      start_date: row.start_date,\n      end_date: row.end_date,\n      Time: row.Time,\n      // Get the message from appropriate column based on sheet\n      message: row.TODO || row.MidDay || row['End Day'] || row['End Day'] || '',\n      slack_user: row.slack_user || '' // First user might be in same row\n    };\n    \n    // If this row also has a user, add it to output\n    if (currentSchedule.slack_user && currentSchedule.slack_user.trim() !== '') {\n      const newItem = JSON.parse(JSON.stringify(item));\n      newItem.json = {\n        ...currentSchedule,\n        sheet_type: row.TODO ? 'TODO' : row.MidDay ? 'MidDay' : 'EndDay'\n      };\n      outputItems.push(newItem);\n    }\n  }\n  \n  // Check if this row has a user in slack_user column (column D)\n  const hasUser = row.slack_user && row.slack_user.trim() !== '';\n  \n  if (hasUser && currentSchedule) {\n    // This is a user row (subsequent rows of merged cells)\n    const newItem = JSON.parse(JSON.stringify(item));\n    \n    // Copy all schedule data and add the user\n    newItem.json = {\n      start_date: currentSchedule.start_date,\n      end_date: currentSchedule.end_date,\n      Time: currentSchedule.Time,\n      message: currentSchedule.message,\n      slack_user: row.slack_user,\n      sheet_type: row.TODO ? 'TODO' : row.MidDay ? 'MidDay' : 'EndDay',\n      // Also preserve original column names for message selection\n      TODO: row.TODO || currentSchedule.message,\n      MidDay: row.MidDay || currentSchedule.message,\n      'End Day': row['End Day'] || currentSchedule.message\n    };\n    \n    outputItems.push(newItem);\n  }\n}\n\n// Now process each item with date/time logic\nfor (const item of outputItems) {\n  const row = item.json;\n  \n  // Parse dates from schedule data\n  const startDate = new Date(row.start_date);\n  const endDate = new Date(row.end_date);\n  \n  // Set to midnight for clean comparison\n  startDate.setHours(0, 0, 0, 0);\n  endDate.setHours(0, 0, 0, 0);\n  \n  const startDateIST = startDate; // Already IST\n  const endDateIST = endDate; // Already IST\n  \n  // Parse time from schedule data\n  let scheduledTime = row.Time;\n  let scheduledHour = 0;\n  let scheduledMinute = 0;\n  let scheduledSecond = 0;\n  \n  // Convert 18.03.00 format to time components\n  if (typeof scheduledTime === 'string' && scheduledTime.includes('.')) {\n    const timeParts = scheduledTime.split('.');\n    scheduledHour = parseInt(timeParts[0]) || 0;\n    scheduledMinute = parseInt(timeParts[1]) || 0;\n    scheduledSecond = parseInt(timeParts[2]) || 0;\n  } else if (typeof scheduledTime === 'number') {\n    // Handle decimal format\n    const timeNum = scheduledTime;\n    scheduledHour = Math.floor(timeNum);\n    const decimalPart = timeNum - scheduledHour;\n    scheduledMinute = Math.round(decimalPart * 60);\n    scheduledSecond = 0;\n  }\n  \n  // Check if TODAY is within the start/end date range\n  const isWithinDateRange = todayIST >= startDateIST && todayIST <= endDateIST;\n  \n  // Calculate scheduled time in seconds (IST)\n  const scheduledTotalSeconds = scheduledHour * 3600 + scheduledMinute * 60 + scheduledSecond;\n  const currentTotalSeconds = currentHour * 3600 + currentMinute * 60 + currentSecond;\n  \n  // Check if scheduled time is in the future today (IST)\n  const isFutureTime = scheduledTotalSeconds > currentTotalSeconds;\n  const timeDifference = scheduledTotalSeconds - currentTotalSeconds;\n  \n  // Should send if: \n  // 1. Within date range ✓\n  // 2. Scheduled time is in the future ✓\n  // 3. We're within 1 minute before it (0 to 60 seconds from now) ✓\n  item.json.shouldSend = isWithinDateRange && isFutureTime && timeDifference <= 60 && timeDifference >= 0;\n  \n  // Create combined datetime\n  const formattedTime = `${scheduledHour.toString().padStart(2, '0')}:${scheduledMinute.toString().padStart(2, '0')}:${scheduledSecond.toString().padStart(2, '0')}`;\n  \n  item.json.combinedDateTime = `${todayDateStr} ${formattedTime}`;\n  item.json.scheduledDateTimeISO = `${todayDateStr}T${formattedTime}`;\n  item.json.scheduledDate = todayDateStr;\n  item.json.scheduledTime = formattedTime;\n  item.json.currentTime = `${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')}:${currentSecond.toString().padStart(2, '0')}`;\n  item.json.timeDifference = timeDifference;\n  item.json.isWithinDateRange = isWithinDateRange;\n  item.json.isFutureTime = isFutureTime;\n  item.json.todayDate = todayDateStr;\n  \n  // Debug info\n  item.json.debug = {\n    todayDateIST: todayDateStr,\n    startDateIST: startDateIST.toISOString().split('T')[0],\n    endDateIST: endDateIST.toISOString().split('T')[0],\n    isWithinDateRange: isWithinDateRange,\n    isFutureTime: isFutureTime,\n    timeDifference: timeDifference,\n    shouldSend: item.json.shouldSend,\n    currentIST: item.json.currentTime,\n    scheduledIST: formattedTime,\n    combinedDateTime: item.json.combinedDateTime,\n    slack_user: row.slack_user,\n    sheet_type: row.sheet_type,\n    hasMergedData: true\n  };\n}\n\n// Filter out items without valid user IDs\nconst validItems = outputItems.filter(item => \n  item.json.slack_user && \n  item.json.slack_user.trim() !== '' && \n  item.json.slack_user !== '-'\n);\n\nreturn validItems;"
+      },
+      "id": "c75f096c-f60a-4bd1-8e45-133948b8fa2e",
+      "name": "Check Date & Time IST",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc",
+          "mode": "list",
+          "cachedResultName": "Slack Automation",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Slack_TODO",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "5cfed4c9-dc3e-40d2-9961-34c627a685c1",
+      "name": "Get TODO Reminder Data2",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "mUp8nEWodYbeQvcR",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "user",
+        "user": {
+          "__rl": true,
+          "value": "={{ $json.slack_user }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.TODO || $json['Mid-Day'] || $json['End Day'] }}",
+        "otherOptions": {
+          "ephemeral": false
+        }
+      },
+      "id": "cfbda648-cd61-4e6b-b4ea-52f1053b7af3",
+      "name": "Send Slack Message1",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        896,
+        0
+      ],
+      "webhookId": "218a5e20-d8fc-4a4e-a2bd-a33e03f2c4d2",
+      "credentials": {
+        "slackApi": {
+          "id": "ZVLnwnAQCyyWEViO",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ $json.scheduledDateTimeISO }}"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        0
+      ],
+      "id": "90f26984-e61e-40f1-89b4-b08d6c784634",
+      "name": "Wait",
+      "webhookId": "f042a9b4-239c-4e84-b22f-c862de7465fc"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "15a6c80f-8e3b-457b-9dad-e48751b94b81",
+              "leftValue": "={{ $json.debug.isFutureTime }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        672,
+        0
+      ],
+      "id": "a865c708-d18e-4def-8326-49d7bb79d6ec",
+      "name": "If1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get current date and time in IST (Indian Standard Time)\nconst now = new Date();\nconst nowUTC = now.getTime();\n\n// IST is UTC+5:30\nconst istOffset = 5.5 * 60 * 60 * 1000; // 5.5 hours in milliseconds\nconst nowIST = new Date(nowUTC + istOffset);\n\nconst currentHour = nowIST.getHours();\nconst currentMinute = nowIST.getMinutes();\nconst currentSecond = nowIST.getSeconds();\n\n// Get today's date at midnight in IST for date comparison\nconst todayIST = new Date(nowIST);\ntodayIST.setHours(0, 0, 0, 0);\n\n// Today's date string\nconst year = todayIST.getFullYear();\nconst month = String(todayIST.getMonth() + 1).padStart(2, '0');\nconst day = String(todayIST.getDate()).padStart(2, '0');\nconst todayDateStr = `${year}-${month}-${day}`;\n\n// Variables to store the current schedule data (from merged cells)\nlet currentSchedule = null;\nconst outputItems = [];\n\n// For each row from the sheet\nfor (const item of items) {\n  const row = item.json;\n  \n  // Check if this row has schedule data (columns A-C and E have values)\n  // Row with schedule will have: start_date, end_date, Time, and TODO/MidDay/End Day\n  const hasScheduleData = row.start_date && row.start_date.trim() !== '' && \n                         row.end_date && row.end_date.trim() !== '' && \n                         row.Time && row.Time.trim() !== '' && \n                         (row.TODO || row.MidDay || row['End Day']);\n  \n  if (hasScheduleData) {\n    // This is a schedule row (first row of merged cells)\n    currentSchedule = {\n      start_date: row.start_date,\n      end_date: row.end_date,\n      Time: row.Time,\n      // Get the message from appropriate column based on sheet\n      message: row.TODO || row.MidDay || row['End Day'] || row['End Day'] || '',\n      slack_user: row.slack_user || '' // First user might be in same row\n    };\n    \n    // If this row also has a user, add it to output\n    if (currentSchedule.slack_user && currentSchedule.slack_user.trim() !== '') {\n      const newItem = JSON.parse(JSON.stringify(item));\n      newItem.json = {\n        ...currentSchedule,\n        sheet_type: row.TODO ? 'TODO' : row.MidDay ? 'MidDay' : 'EndDay'\n      };\n      outputItems.push(newItem);\n    }\n  }\n  \n  // Check if this row has a user in slack_user column (column D)\n  const hasUser = row.slack_user && row.slack_user.trim() !== '';\n  \n  if (hasUser && currentSchedule) {\n    // This is a user row (subsequent rows of merged cells)\n    const newItem = JSON.parse(JSON.stringify(item));\n    \n    // Copy all schedule data and add the user\n    newItem.json = {\n      start_date: currentSchedule.start_date,\n      end_date: currentSchedule.end_date,\n      Time: currentSchedule.Time,\n      message: currentSchedule.message,\n      slack_user: row.slack_user,\n      sheet_type: row.TODO ? 'TODO' : row.MidDay ? 'MidDay' : 'EndDay',\n      // Also preserve original column names for message selection\n      TODO: row.TODO || currentSchedule.message,\n      MidDay: row.MidDay || currentSchedule.message,\n      'End Day': row['End Day'] || currentSchedule.message\n    };\n    \n    outputItems.push(newItem);\n  }\n}\n\n// Now process each item with date/time logic\nfor (const item of outputItems) {\n  const row = item.json;\n  \n  // Parse dates from schedule data\n  const startDate = new Date(row.start_date);\n  const endDate = new Date(row.end_date);\n  \n  // Set to midnight for clean comparison\n  startDate.setHours(0, 0, 0, 0);\n  endDate.setHours(0, 0, 0, 0);\n  \n  const startDateIST = startDate; // Already IST\n  const endDateIST = endDate; // Already IST\n  \n  // Parse time from schedule data\n  let scheduledTime = row.Time;\n  let scheduledHour = 0;\n  let scheduledMinute = 0;\n  let scheduledSecond = 0;\n  \n  // Convert 18.03.00 format to time components\n  if (typeof scheduledTime === 'string' && scheduledTime.includes('.')) {\n    const timeParts = scheduledTime.split('.');\n    scheduledHour = parseInt(timeParts[0]) || 0;\n    scheduledMinute = parseInt(timeParts[1]) || 0;\n    scheduledSecond = parseInt(timeParts[2]) || 0;\n  } else if (typeof scheduledTime === 'number') {\n    // Handle decimal format\n    const timeNum = scheduledTime;\n    scheduledHour = Math.floor(timeNum);\n    const decimalPart = timeNum - scheduledHour;\n    scheduledMinute = Math.round(decimalPart * 60);\n    scheduledSecond = 0;\n  }\n  \n  // Check if TODAY is within the start/end date range\n  const isWithinDateRange = todayIST >= startDateIST && todayIST <= endDateIST;\n  \n  // Calculate scheduled time in seconds (IST)\n  const scheduledTotalSeconds = scheduledHour * 3600 + scheduledMinute * 60 + scheduledSecond;\n  const currentTotalSeconds = currentHour * 3600 + currentMinute * 60 + currentSecond;\n  \n  // Check if scheduled time is in the future today (IST)\n  const isFutureTime = scheduledTotalSeconds > currentTotalSeconds;\n  const timeDifference = scheduledTotalSeconds - currentTotalSeconds;\n  \n  // Should send if: \n  // 1. Within date range ✓\n  // 2. Scheduled time is in the future ✓\n  // 3. We're within 1 minute before it (0 to 60 seconds from now) ✓\n  item.json.shouldSend = isWithinDateRange && isFutureTime && timeDifference <= 60 && timeDifference >= 0;\n  \n  // Create combined datetime\n  const formattedTime = `${scheduledHour.toString().padStart(2, '0')}:${scheduledMinute.toString().padStart(2, '0')}:${scheduledSecond.toString().padStart(2, '0')}`;\n  \n  item.json.combinedDateTime = `${todayDateStr} ${formattedTime}`;\n  item.json.scheduledDateTimeISO = `${todayDateStr}T${formattedTime}`;\n  item.json.scheduledDate = todayDateStr;\n  item.json.scheduledTime = formattedTime;\n  item.json.currentTime = `${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')}:${currentSecond.toString().padStart(2, '0')}`;\n  item.json.timeDifference = timeDifference;\n  item.json.isWithinDateRange = isWithinDateRange;\n  item.json.isFutureTime = isFutureTime;\n  item.json.todayDate = todayDateStr;\n  \n  // Debug info\n  item.json.debug = {\n    todayDateIST: todayDateStr,\n    startDateIST: startDateIST.toISOString().split('T')[0],\n    endDateIST: endDateIST.toISOString().split('T')[0],\n    isWithinDateRange: isWithinDateRange,\n    isFutureTime: isFutureTime,\n    timeDifference: timeDifference,\n    shouldSend: item.json.shouldSend,\n    currentIST: item.json.currentTime,\n    scheduledIST: formattedTime,\n    combinedDateTime: item.json.combinedDateTime,\n    slack_user: row.slack_user,\n    sheet_type: row.sheet_type,\n    hasMergedData: true\n  };\n}\n\n// Filter out items without valid user IDs\nconst validItems = outputItems.filter(item => \n  item.json.slack_user && \n  item.json.slack_user.trim() !== '' && \n  item.json.slack_user !== '-'\n);\n\nreturn validItems;"
+      },
+      "id": "03dcc306-a382-4495-8d65-37dcc718ca3c",
+      "name": "Check Date & Time IST1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        272
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "user",
+        "user": {
+          "__rl": true,
+          "value": "={{ $json.slack_user }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.TODO || $json['Mid-Day'] || $json['End Day'] }}",
+        "otherOptions": {}
+      },
+      "id": "ad02d633-c678-4f14-9117-3c4b7ccb0af7",
+      "name": "Send Slack Message",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        880,
+        272
+      ],
+      "webhookId": "218a5e20-d8fc-4a4e-a2bd-a33e03f2c4d2",
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "CWNn6gkuFmqfQxA9",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ $json.scheduledDateTimeISO }}"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        432,
+        272
+      ],
+      "id": "62fc0a8b-d078-445b-9ee7-76980a958959",
+      "name": "Wait1",
+      "webhookId": "f042a9b4-239c-4e84-b22f-c862de7465fc"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "15a6c80f-8e3b-457b-9dad-e48751b94b81",
+              "leftValue": "={{ $json.debug.isFutureTime }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        656,
+        272
+      ],
+      "id": "09752186-1fb1-4ae6-b4d4-a68b32e7147d",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get current date and time in IST (Indian Standard Time)\nconst now = new Date();\nconst nowUTC = now.getTime();\n\n// IST is UTC+5:30\nconst istOffset = 5.5 * 60 * 60 * 1000; // 5.5 hours in milliseconds\nconst nowIST = new Date(nowUTC + istOffset);\n\nconst currentHour = nowIST.getHours();\nconst currentMinute = nowIST.getMinutes();\nconst currentSecond = nowIST.getSeconds();\n\n// Get today's date at midnight in IST for date comparison\nconst todayIST = new Date(nowIST);\ntodayIST.setHours(0, 0, 0, 0);\n\n// Today's date string\nconst year = todayIST.getFullYear();\nconst month = String(todayIST.getMonth() + 1).padStart(2, '0');\nconst day = String(todayIST.getDate()).padStart(2, '0');\nconst todayDateStr = `${year}-${month}-${day}`;\n\n// Variables to store the current schedule data (from merged cells)\nlet currentSchedule = null;\nconst outputItems = [];\n\n// For each row from the sheet\nfor (const item of items) {\n  const row = item.json;\n  \n  // Check if this row has schedule data (columns A-C and E have values)\n  // Row with schedule will have: start_date, end_date, Time, and TODO/MidDay/End Day\n  const hasScheduleData = row.start_date && row.start_date.trim() !== '' && \n                         row.end_date && row.end_date.trim() !== '' && \n                         row.Time && row.Time.trim() !== '' && \n                         (row.TODO || row.MidDay || row['End Day']);\n  \n  if (hasScheduleData) {\n    // This is a schedule row (first row of merged cells)\n    currentSchedule = {\n      start_date: row.start_date,\n      end_date: row.end_date,\n      Time: row.Time,\n      // Get the message from appropriate column based on sheet\n      message: row.TODO || row.MidDay || row['End Day'] || row['End Day'] || '',\n      slack_user: row.slack_user || '' // First user might be in same row\n    };\n    \n    // If this row also has a user, add it to output\n    if (currentSchedule.slack_user && currentSchedule.slack_user.trim() !== '') {\n      const newItem = JSON.parse(JSON.stringify(item));\n      newItem.json = {\n        ...currentSchedule,\n        sheet_type: row.TODO ? 'TODO' : row.MidDay ? 'MidDay' : 'EndDay'\n      };\n      outputItems.push(newItem);\n    }\n  }\n  \n  // Check if this row has a user in slack_user column (column D)\n  const hasUser = row.slack_user && row.slack_user.trim() !== '';\n  \n  if (hasUser && currentSchedule) {\n    // This is a user row (subsequent rows of merged cells)\n    const newItem = JSON.parse(JSON.stringify(item));\n    \n    // Copy all schedule data and add the user\n    newItem.json = {\n      start_date: currentSchedule.start_date,\n      end_date: currentSchedule.end_date,\n      Time: currentSchedule.Time,\n      message: currentSchedule.message,\n      slack_user: row.slack_user,\n      sheet_type: row.TODO ? 'TODO' : row.MidDay ? 'MidDay' : 'EndDay',\n      // Also preserve original column names for message selection\n      TODO: row.TODO || currentSchedule.message,\n      MidDay: row.MidDay || currentSchedule.message,\n      'End Day': row['End Day'] || currentSchedule.message\n    };\n    \n    outputItems.push(newItem);\n  }\n}\n\n// Now process each item with date/time logic\nfor (const item of outputItems) {\n  const row = item.json;\n  \n  // Parse dates from schedule data\n  const startDate = new Date(row.start_date);\n  const endDate = new Date(row.end_date);\n  \n  // Set to midnight for clean comparison\n  startDate.setHours(0, 0, 0, 0);\n  endDate.setHours(0, 0, 0, 0);\n  \n  const startDateIST = startDate; // Already IST\n  const endDateIST = endDate; // Already IST\n  \n  // Parse time from schedule data\n  let scheduledTime = row.Time;\n  let scheduledHour = 0;\n  let scheduledMinute = 0;\n  let scheduledSecond = 0;\n  \n  // Convert 18.03.00 format to time components\n  if (typeof scheduledTime === 'string' && scheduledTime.includes('.')) {\n    const timeParts = scheduledTime.split('.');\n    scheduledHour = parseInt(timeParts[0]) || 0;\n    scheduledMinute = parseInt(timeParts[1]) || 0;\n    scheduledSecond = parseInt(timeParts[2]) || 0;\n  } else if (typeof scheduledTime === 'number') {\n    // Handle decimal format\n    const timeNum = scheduledTime;\n    scheduledHour = Math.floor(timeNum);\n    const decimalPart = timeNum - scheduledHour;\n    scheduledMinute = Math.round(decimalPart * 60);\n    scheduledSecond = 0;\n  }\n  \n  // Check if TODAY is within the start/end date range\n  const isWithinDateRange = todayIST >= startDateIST && todayIST <= endDateIST;\n  \n  // Calculate scheduled time in seconds (IST)\n  const scheduledTotalSeconds = scheduledHour * 3600 + scheduledMinute * 60 + scheduledSecond;\n  const currentTotalSeconds = currentHour * 3600 + currentMinute * 60 + currentSecond;\n  \n  // Check if scheduled time is in the future today (IST)\n  const isFutureTime = scheduledTotalSeconds > currentTotalSeconds;\n  const timeDifference = scheduledTotalSeconds - currentTotalSeconds;\n  \n  // Should send if: \n  // 1. Within date range ✓\n  // 2. Scheduled time is in the future ✓\n  // 3. We're within 1 minute before it (0 to 60 seconds from now) ✓\n  item.json.shouldSend = isWithinDateRange && isFutureTime && timeDifference <= 60 && timeDifference >= 0;\n  \n  // Create combined datetime\n  const formattedTime = `${scheduledHour.toString().padStart(2, '0')}:${scheduledMinute.toString().padStart(2, '0')}:${scheduledSecond.toString().padStart(2, '0')}`;\n  \n  item.json.combinedDateTime = `${todayDateStr} ${formattedTime}`;\n  item.json.scheduledDateTimeISO = `${todayDateStr}T${formattedTime}`;\n  item.json.scheduledDate = todayDateStr;\n  item.json.scheduledTime = formattedTime;\n  item.json.currentTime = `${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')}:${currentSecond.toString().padStart(2, '0')}`;\n  item.json.timeDifference = timeDifference;\n  item.json.isWithinDateRange = isWithinDateRange;\n  item.json.isFutureTime = isFutureTime;\n  item.json.todayDate = todayDateStr;\n  \n  // Debug info\n  item.json.debug = {\n    todayDateIST: todayDateStr,\n    startDateIST: startDateIST.toISOString().split('T')[0],\n    endDateIST: endDateIST.toISOString().split('T')[0],\n    isWithinDateRange: isWithinDateRange,\n    isFutureTime: isFutureTime,\n    timeDifference: timeDifference,\n    shouldSend: item.json.shouldSend,\n    currentIST: item.json.currentTime,\n    scheduledIST: formattedTime,\n    combinedDateTime: item.json.combinedDateTime,\n    slack_user: row.slack_user,\n    sheet_type: row.sheet_type,\n    hasMergedData: true\n  };\n}\n\n// Filter out items without valid user IDs\nconst validItems = outputItems.filter(item => \n  item.json.slack_user && \n  item.json.slack_user.trim() !== '' && \n  item.json.slack_user !== '-'\n);\n\nreturn validItems;"
+      },
+      "id": "d24ec8f0-a8a2-4e3f-b1c1-1c500ad9a182",
+      "name": "Check Date & Time IST2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        496
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "user",
+        "user": {
+          "__rl": true,
+          "value": "={{ $json.slack_user }}",
+          "mode": "id"
+        },
+        "text": "={{ $json.TODO || $json['Mid-Day'] || $json['End Day'] }}",
+        "otherOptions": {
+          "ephemeral": false
+        }
+      },
+      "id": "fa1b5a31-9da2-47b4-bac6-0e30ecf1c319",
+      "name": "Send Slack Message2",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        880,
+        496
+      ],
+      "webhookId": "218a5e20-d8fc-4a4e-a2bd-a33e03f2c4d2",
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "CWNn6gkuFmqfQxA9",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ $json.scheduledDateTimeISO }}"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        432,
+        496
+      ],
+      "id": "2945d63e-9910-4ce5-ace2-ff919c83eb13",
+      "name": "Wait2",
+      "webhookId": "f042a9b4-239c-4e84-b22f-c862de7465fc"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "15a6c80f-8e3b-457b-9dad-e48751b94b81",
+              "leftValue": "={{ $json.debug.isFutureTime }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        656,
+        496
+      ],
+      "id": "cf9485d2-3764-4f68-b59c-5d77fc2c64bc",
+      "name": "If2"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "2e49ae4f-f33a-4a4f-8505-dc72b3e91758",
+      "name": "Check Schedule - TODO",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -224,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc",
+          "mode": "list",
+          "cachedResultName": "Slack Automation",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 929420422,
+          "mode": "list",
+          "cachedResultName": "Slack_Midday",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc/edit#gid=929420422"
+        },
+        "options": {}
+      },
+      "id": "f80f3ee7-5a63-4ecc-97e5-82c9fe91412a",
+      "name": "Get MidDay Reminder Data",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -16,
+        272
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "mUp8nEWodYbeQvcR",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc",
+          "mode": "list",
+          "cachedResultName": "Slack Automation",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1745404057,
+          "mode": "list",
+          "cachedResultName": "Slack_EndDay",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/12LZYXoTHW4_Prrf9y0MX9TkE2PlT5Kcxpl3rCdzvZcc/edit#gid=1745404057"
+        },
+        "options": {}
+      },
+      "id": "b1d12e82-b111-46bc-84c6-8ef67c2b4653",
+      "name": "Get EndDay Reminder Data3",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -16,
+        496
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "mUp8nEWodYbeQvcR",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Check Date & Time IST": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get TODO Reminder Data2": {
+      "main": [
+        [
+          {
+            "node": "Check Date & Time IST",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Date & Time IST1": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Date & Time IST2": {
+      "main": [
+        [
+          {
+            "node": "Wait2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait2": {
+      "main": [
+        [
+          {
+            "node": "If2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If2": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Message2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Schedule - TODO": {
+      "main": [
+        [
+          {
+            "node": "Get TODO Reminder Data2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get MidDay Reminder Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get EndDay Reminder Data3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get MidDay Reminder Data": {
+      "main": [
+        [
+          {
+            "node": "Check Date & Time IST1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get EndDay Reminder Data3": {
+      "main": [
+        [
+          {
+            "node": "Check Date & Time IST2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "60344901-9e7e-4912-8a0b-cfec2c265e4e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "66ee1df2b1e252b8f75c37c5fa7a2090497bf90948da8f01451a6f5f6f2722e8"
+  },
+  "id": "DDG84MazqCb4g103",
+  "tags": []
+}

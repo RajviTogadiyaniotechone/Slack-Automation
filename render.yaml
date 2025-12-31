@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: n8n-slack-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: N8N_BASIC_AUTH_ACTIVE
+        value: true
+      - key: N8N_BASIC_AUTH_USER
+        value: Rajvi
+      - key: N8N_BASIC_AUTH_PASSWORD
+        generateValue: true  # Render will generate a secure password
+      - key: WEBHOOK_URL
+        sync: false  # We'll update this after deployment
+      - key: N8N_PROTOCOL
+        value: https
+      - key: N8N_HOST
+        sync: false  # We'll update this after deployment
+      - key: N8N_ENCRYPTION_KEY
+        generateValue: true
+      - key: EXECUTIONS_DATA_PRUNE
+        value: true
+      - key: EXECUTIONS_DATA_MAX_AGE
+        value: 168
+      - key: GENERIC_TIMEZONE
+        value: Asia/Kolkata
+      - key: N8N_USER_FOLDER
+        value: /home/node/.n8n
+    numInstances: 1
+    healthCheckPath: /healthz
+    autoDeploy: true
+    disk:
+      name: n8n-data
+      mountPath: /home/node/.n8n
+      sizeGB: 1

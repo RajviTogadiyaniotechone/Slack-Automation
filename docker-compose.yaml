@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  n8n:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=Rajvi
+      - N8N_BASIC_AUTH_PASSWORD=!a9q2kFe3aK.Lti
+      - NODE_ENV=production
+      - WEBHOOK_URL=https://slack-app-name.onrender.com
+      - N8N_PROTOCOL=https
+      - N8N_HOST=slack-app-name.onrender.com
+      - GENERIC_TIMEZONE=Asia/Kolkata
